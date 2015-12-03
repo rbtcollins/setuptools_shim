@@ -1,0 +1,7 @@
+[run]
+branch = True
+source = setuptools_shim
+omit = setuptools_shim/openstack/*
+
+[report]
+ignore_errors = True
