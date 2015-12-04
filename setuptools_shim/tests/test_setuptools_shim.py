@@ -10,10 +10,13 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 
+from fixtures import Fixture
+
 from testtools import TestCase
 
-
 class TestSetuptools_shim(TestCase):
+
+    resources = []
 
     def test_pip_7_develop_install(self):
         pass
