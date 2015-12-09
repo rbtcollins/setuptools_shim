@@ -16,7 +16,7 @@ can be installed by older pip versions which do not implement the interface.
 Usage
 -----
 
-1. Copy ``setup-shim.py`` from this project into your source tree as
+1. Copy ``shim.py`` from this project into your source tree as
    ``setup.py``
 
 Once this is done, calling ``setup.py`` will trigger easy-install to make
