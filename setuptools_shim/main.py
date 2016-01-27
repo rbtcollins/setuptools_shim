@@ -54,6 +54,8 @@ def main(argv, orig_path):
         return _develop(build, argv)
     elif argv[1] == "install":
         return _install(build, argv)
+    elif argv[1] == "bdist_wheel":
+        return _wheel(build, argv)
     else:
         raise Exception("Unknown command in %r" % (argv,))
 
@@ -193,6 +195,18 @@ def _install(build, argv):
         os.rename(info_dir, egg_info)
 
 
+def _wheel(build, argv):
+    # Seen command lines:
+    #  ['-c', 'bdist_wheel', '-d', '/tmp/tmpAB5b0dpip-wheel-']
+    for index, opt in enumerate(argv):
+        if opt == "-d":
+            dest = argv[index+1]
+            break
+    else:
+        dest = None
+    build.wheel(dest)
+
+
 @contextlib.contextmanager
 def TempDir():
     tempdir = tempfile.mkdtemp()
@@ -260,6 +274,8 @@ class AbstractBuildSystem(object):
         command = ['wheel']
         if outputdir is not None:
             command.extend(['-d', outputdir])
+        else:
+            outputdir = '.'
         self._run_command(command, stdout=None)
         fnames = glob.glob(outputdir + '/*.whl')
         return fnames[0]

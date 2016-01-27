@@ -380,4 +380,23 @@ class TestSetuptools_shim(ResourcedTestCase, TestCase):
             pass
 
     def test_pip_7_wheel(self):
-        pass
+        # Using pip 7 install to build a wheel
+        # configure setuptools to use a private repo
+        # and disable the real index
+        configure_mirror(self.sdistrepo, self.venv)
+        # create a project on disk that uses it
+        project = self.useFixture(TestProject())
+        # A place to put the wheel we build.
+        wheelhouse = project.path + '/wheels'
+        os.mkdir(wheelhouse)
+        self.useFixture(CapturedSubprocess('pip wheel',
+            [self.venv.python, '-m', 'pip', 'wheel', project.path, '-vvv',
+             '-w', wheelhouse]))
+        # Install the wheel
+        self.useFixture(CapturedSubprocess('wheel install',
+            [self.venv.python, '-m', 'pip', 'install', 'test', '-vvv', '-f',
+             wheelhouse]))
+        # check that it was installed.
+        path = self.venv.path + '/lib/python%s.%s/site-packages/wheelinstalled.py' % sys.version_info[:2]
+        with open(path, 'rt'):
+            pass
