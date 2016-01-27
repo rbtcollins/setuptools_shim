@@ -10,9 +10,13 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 
+import contextlib
 import email.parser
+import errno
+import glob
 import os
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -21,6 +25,8 @@ import tempfile
 from setuptools import setup
 from packaging.requirements import Requirement
 from pkg_resources import DistInfoDistribution, PathMetadata, DEVELOP_DIST
+
+from setuptools_shim import frompip
 
 def main(argv, orig_path):
     """CLI entry point for setuptools_shim.
@@ -46,6 +52,8 @@ def main(argv, orig_path):
         return _egg_info(build, argv)
     elif argv[1] == "develop":
         return _develop(build, argv)
+    elif argv[1] == "install":
+        return _install(build, argv)
     else:
         raise Exception("Unknown command in %r" % (argv,))
 
@@ -112,7 +120,87 @@ def _develop(build, argv):
     # develop --no-deps
     # TODO: parse and translate --prefix and or --root parameters.
     build.develop()
-    
+
+
+def _install(build, argv):
+    # Seen pip command lines:
+    # ['-c', 'install', '--record',
+    # '/tmp/pip-KDCQU2-record/install-record.txt',
+    # '--single-version-externally-managed', '--compile', '--install-headers',
+    # '/tmp/tmpUwed3P/include/site/python2.7/demo']
+    # XX: TODO use argparse, but need to handle unknown options etc
+    for index, opt in enumerate(argv):
+        if opt == '--record':
+            record_name = argv[index+1]
+            break
+    else:
+        raise Exception(
+            "--record not supplied. If installing by hand, use pip install "
+            "DIRECTORY")
+    # There is no install in the abstract build system, so we build a wheel,
+    # then invoke pip recursively to install that.
+    with TempDir() as tempdir:
+        fname = build.wheel(tempdir)
+        # run pip from the target environment to install the wheel.
+        # Since pip has called us, and there may be dependency loops etc
+        # involved, we disable dependency handling - thats the parent pips
+        # problem.
+        command = [sys.executable, '-m', 'pip', '-v', 'install', '--no-deps', fname]
+        wheel_file_re = re.compile(
+            r"""^(?P<namever>(?P<name>.+?)-(?:\d.*?))
+            ((-(?:\d.*?))?-(?:.+?)-(?:.+?)-(?:.+?)
+            \.whl)$""",
+            re.VERBOSE
+        )
+        wheel_info = wheel_file_re.match(os.path.basename(fname))
+        if not wheel_info:
+            raise Exception("Could not determine wheel name from %r" % fname)
+        name = wheel_info.group('name').replace('_', '-')
+        build._run_command(command, stdout=None, use_prefix=False)
+        # Now that it is installed, make it look like a setuptools egg installed thing:
+        # -> rename the .dist-info directory to be .egg-info on disk
+        # -> transform RECORD to the install-record:
+        #    strip the hashes from each line - remove the last two ',' fields.
+        #    rename .dist-info to .egg-info
+        # -> convert from relative paths to absolute, as thats what pip expects
+        # find the path the wheel was installed into. 
+        scheme = frompip.distutils_scheme(name)
+        namever = wheel_info.group('namever')
+        info_name = namever + '.dist-info'
+        info_dir = scheme['purelib'] + '/' + info_name
+        try:
+            with open(info_dir + '/RECORD', 'rt') as record_file:
+                record = record_file.readlines()
+        except IOError as e:
+            if e.errno == errno.ENOENT:
+                info_dir = scheme['platlib'] + '/' + info_name
+                with open(info_dir + '/RECORD', 'rt') as record_file:
+                    record = record_file.readlines()
+        # process the lines
+        lib_dir = os.path.dirname(info_dir)
+        new_lines = []
+        for line in record:
+            name = line.rsplit(',', 2)[0]
+            name = name.replace('.dist-info', '.egg-info')
+            name = os.path.join(lib_dir, name)
+            new_lines.append(name + '\n')
+        with open(record_name, 'wt') as record_file:
+            record_file.writelines(new_lines)
+        # Delete the RECORD file, that is for .dist-info
+        os.unlink(info_dir + '/RECORD')
+        # Rename the .dist-info directory to .egg-info
+        egg_info = os.path.join(lib_dir, namever + '.egg-info')
+        os.rename(info_dir, egg_info)
+
+
+@contextlib.contextmanager
+def TempDir():
+    tempdir = tempfile.mkdtemp()
+    try:
+        yield tempdir
+    finally:
+        shutil.rmtree(tempdir, ignore_errors=True)
+
 
 class AbstractBuildSystem(object):
     """The PEP XXX abstract build system.
@@ -168,19 +256,26 @@ class AbstractBuildSystem(object):
         metadata_bytes = self._metadata_bytes()
         return self._parse_metadata_bytes(metadata_bytes)
 
+    def wheel(self, outputdir=None):
+        command = ['wheel']
+        if outputdir is not None:
+            command.extend(['-d', outputdir])
+        self._run_command(command, stdout=None)
+        fnames = glob.glob(outputdir + '/*.whl')
+        return fnames[0]
+
     def _parse_metadata_bytes(self, metadata_bytes):
         # Make a temp wheel on disk. (Ugh, aiee, etc, but lets us avoid
         # reimplementing much of pkg_resources while still having its
         # normalisation etc.
-        tempdir = tempfile.mkdtemp()
-        metadata_path = os.path.join(tempdir, 'METADATA')
-        with open(metadata_path, 'wb') as output:
-            output.write(metadata_bytes)
-        if sys.version_info < ('3',):
-            metadata_str = metadata_bytes.decode('utf-8')
-        else:
-            metadata_str = metadata_bytes
-        try:
+        with TempDir() as tempdir:
+            metadata_path = os.path.join(tempdir, 'METADATA')
+            with open(metadata_path, 'wb') as output:
+                output.write(metadata_bytes)
+            if sys.version_info < ('3',):
+                metadata_str = metadata_bytes.decode('utf-8')
+            else:
+                metadata_str = metadata_bytes
             # Try not to poke too deeply into pkg_resources implementation.
             metadata = PathMetadata(tempdir, tempdir)
             pkg_info = email.parser.Parser().parsestr(metadata_str)
@@ -191,15 +286,16 @@ class AbstractBuildSystem(object):
                 precedence=DEVELOP_DIST)
             # cache the metadata before we delete the temp file on disk.
             dist.requires()
-        finally:
-            shutil.rmtree(tempdir, ignore_errors=True)
         return dist
 
     def _metadata_bytes(self):
         return self._run_command(['metadata'])
 
-    def _run_command(self, command, stdout=subprocess.PIPE):
-        cmd = self._cmd_prefix + command
+    def _run_command(self, command, stdout=subprocess.PIPE, use_prefix=True):
+        if use_prefix:
+            cmd = self._cmd_prefix + command
+        else:
+            cmd = command
         proc_env = os.environ.copy()
         os.environ['PYTHON'] = sys.executable
         if self._pythonpath is not self._sentinel:
@@ -208,6 +304,7 @@ class AbstractBuildSystem(object):
             else:
                 proc_env['PYTHONPATH'] = self._pythonpath
         try:
+            sys.stderr.write("Running %s\n" % " ".join(cmd))
             proc = subprocess.Popen(
                 cmd,
                 cwd=self.root, stdout=stdout,

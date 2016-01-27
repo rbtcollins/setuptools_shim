@@ -13,6 +13,7 @@
 import json
 import os
 import subprocess
+import sys
 from textwrap import dedent
 
 import fixtures
@@ -197,14 +198,17 @@ class TestBuilder(fixtures.Fixture):
                 )
             """)
         script = dedent("""\
+            import base64
+            from hashlib import sha256
             import json
             import sys
+            import zipfile
             from textwrap import dedent
             if sys.argv[1:] == ['metadata']:
                 import testdep
                 print(dedent('''\
                     Metadata-Version: 2.0
-                    Name: demo
+                    Name: test
                     Version: 1.0.0
                     Author: foo
                     Author-email: bar
@@ -214,12 +218,51 @@ class TestBuilder(fixtures.Fixture):
                     Requires-Dist: extra; extra == 'extra'
                     Requires-Dist: nothing; extra == ''
                     Requires-Dist: testdep
-                    '''))
+                    ''').lstrip())
             elif sys.argv[1:] == ['build_requires']:
                 print json.dumps({'build_requires':['testdep']})
             elif sys.argv[1:] == ['develop']:
                 with open("develop-done", "wt"):
                     pass
+            elif sys.argv[1] == 'wheel':
+                # Write a wheel with one trivial file.
+                name = 'test-1.0-py2.py3-none-any.whl'
+                if sys.argv[2:]:
+                    assert sys.argv[2] == '-d'
+                    name = sys.argv[3] + '/' + name
+                f = zipfile.ZipFile(name, 'w')
+                hashes = {}
+                def add(name, data):
+                    f.writestr(name, data)
+                    hash = sha256(data).digest()
+                    hashes[name] = (base64.urlsafe_b64encode(hash).rstrip(b'='), len(data))
+                add('wheelinstalled.py', b'')
+                add('test-1.0.dist-info/METADATA', dedent('''\
+                    Metadata-Version: 2.0
+                    Name: test
+                    Version: 1.0
+                    Summary: UNKNOWN
+                    Home-page: UNKNOWN
+                    Author: UNKNOWN
+                    Author-email: UNKNOWN
+                    License: UNKNOWN
+                    Platform: UNKNOWN
+                    
+                    UNKNOWN
+                    
+                    ''').encode('utf8').lstrip())
+                add('test-1.0.dist-info/WHEEL', dedent('''\
+                    Wheel-Version: 1.0
+                    Generator: bdist_wheel (0.26.0)
+                    Root-Is-Purelib: true
+                    Tag: py2-none-any
+                    ''').encode('utf8').lstrip())
+                record = b'\\n'.join(
+                    b'%s,sha256=%s,%s' % (name, meta[0], meta[1]) for
+                    (name, meta) in hashes.items())
+                record += '\\ntest-1.0.dist-info/RECORD,,\\n'
+                add('test-1.0.dist-info/RECORD', record)
+                f.close()
             else:
                 sys.exit(1)
             sys.exit(0)
@@ -319,7 +362,22 @@ class TestSetuptools_shim(ResourcedTestCase, TestCase):
             pass
 
     def test_pip_7_install(self):
-        pass
+        # Using pip 7 install without wheels
+        # configure setuptools to use a private repo
+        # and disable the real index
+        configure_mirror(self.sdistrepo, self.venv)
+        # create a project on disk that uses it
+        project = self.useFixture(TestProject())
+        # do an install via pip --no-binary :all:
+        # this will need to thunk through to wheel and install that wheel
+        # itself.
+        self.useFixture(CapturedSubprocess('source install',
+            [self.venv.python, '-m', 'pip', 'install', '--no-binary', ':all:',
+             project.path, '-vvv']))
+        # check that it was installed.
+        path = self.venv.path + '/lib/python%s.%s/site-packages/wheelinstalled.py' % sys.version_info[:2]
+        with open(path, 'rt'):
+            pass
 
     def test_pip_7_wheel(self):
         pass
